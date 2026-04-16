@@ -41,6 +41,15 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+#---------------------------
+# BREAKER SETUP
+#---------------------------
+class CircuitBreaker:
+    def __init__(self, failure_threshold=3, recovery_time=180):
+        self.failure_threshold = failure_threshold
+        self.recovery_time = recovery_time
+        self.failures = 0
+        self.last_failure_time = None
 
 #---------------------------
 # STEP 1: FETCH DATA
@@ -48,8 +57,14 @@ logging.basicConfig(
 MAX_RETRIES = 5
 INITIAL_DELAY = 1   # seconds
 TIMEOUT = (3,10)    # (connect, read)
+breaker = CircuitBreaker(failure_threshold=3, recovery_time=180)
 
 def fetch_crypto_data():
+    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    if not breaker.can_request():
+        logging.warning(f"Circuit breaker OPEN — skipping API call for {timestamp}")
+        raise Exception("Circuit breaker active")
+
     params = {
         'vs_currency': 'usd',
         'ids':','.join(COIN_IDS),
@@ -65,6 +80,7 @@ def fetch_crypto_data():
             response = requests.get(URL, params=params, timeout=TIMEOUT)
             response.raise_for_status()
             logging.info('Data fetched successfully')
+            breaker.record_success()
             return response.json()
         #------------------------
         # HANDLE TIMEOUT
@@ -85,6 +101,7 @@ def fetch_crypto_data():
             # Retry only on server errors (5xx)
             if 500 <= status_code < 600:
                 logging.warning(f'Server error {status_code} on attempt {attempt}')
+                breaker.record_failure()
             else:
                 logging.error(f'Client error {status_code} - not retrying')
                 raise
@@ -93,6 +110,7 @@ def fetch_crypto_data():
         #-----------------------
         except requests.exceptions.RequestException as e:
             logging.error(f'Request failed: {e}')
+            breaker.record_failure()
             raise
         
         #-----------------------
@@ -105,7 +123,8 @@ def fetch_crypto_data():
 
     #---------------------
     # FINAL FAILURE
-    #---------------------       
+    #---------------------
+    logging.warning(f"Missing data for {timestamp} after all retries failed")       
     raise Exception('Failed to fetch crypto data after multiple retries')        
 
 #---------------------------
