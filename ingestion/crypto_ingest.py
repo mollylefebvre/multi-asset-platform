@@ -2,9 +2,17 @@ import logging
 import requests
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from google.cloud import storage
 import gzip
+
+def get_default_timestamp():
+    """
+    Used only when no scheduler is present.
+    Return the latest *safe* complete minute.
+    """
+    now =datetime.now(timezone.utc)
+    return (now - timedelta(minute=1)).replace(second=0, microsecond=0)
 
 #---------------------------
 # CONFIG
@@ -59,10 +67,17 @@ INITIAL_DELAY = 1   # seconds
 TIMEOUT = (3,10)    # (connect, read)
 breaker = CircuitBreaker(failure_threshold=3, recovery_time=180)
 
-def fetch_crypto_data():
-    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+def fetch_crypto_data(timestamp):
+
+    def now():
+        return datetime.now(timezone.utc).isoformat()
+    
+    run_ts = timestamp.isoformat()
+
     if not breaker.can_request():
-        logging.warning(f"Circuit breaker OPEN — skipping API call for {timestamp}")
+        logging.warning(
+            f"[EVENT {run_ts}] [PROC {now()}] [SKIP] Circuit breaker OPEN — skipping API call"
+        )
         raise Exception("Circuit breaker active")
 
     params = {
@@ -76,66 +91,90 @@ def fetch_crypto_data():
 
     for attempt in range(1, MAX_RETRIES+1):
         try:
-            logging.info(f'Attempt {attempt} - Fetching Crypto data...')
+            logging.info(
+                f"[EVENT {run_ts}] [PROC {now()}] [ATTEMPT {attempt}] Fetching Crypto data..."
+            )
+
             response = requests.get(URL, params=params, timeout=TIMEOUT)
             response.raise_for_status()
-            logging.info('Data fetched successfully')
+
+            logging.info(
+                f"[EVENT {run_ts}] [PROC {now()}] [SUCCESS] Data fetched successfully on attempt {attempt}"
+            )
+
             breaker.record_success()
             return response.json()
         #------------------------
-        # HANDLE TIMEOUT
+        # TIMEOUT
         #------------------------
         except requests.exceptions.Timeout:
-            logging.warning(f'Timeout on attempt {attempt}')
-        
+            logging.warning(
+                f"[EVENT {run_ts}] [PROC {now()}] [ATTEMPT {attempt}] [TIMEOUT]"
+            )
         #------------------------
-        # HANDLE HTTP ERRORS (4xx, 5xx)
+        # HTTP ERRORS (4xx, 5xx)
         #------------------------
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
 
             if status_code == 429:
-                retry_after = int(e.response.headers.get('Retry-After', 5))
-                logging.warning(f'Rate limited. Waiting {retry_after}s ...')
-                time.sleep(retry_after)
+                retry_after = int(e.response.headers.get('Retry-After', delay))
+
+                wait_time = max(retry_after, delay)
+
+                logging.warning(
+                    f"[EVENT {run_ts}] [PROC {now()}] [ATTEMPT {attempt}] [RATE_LIMIT] "
+                    f"Retry after {retry_after}s (retry_after={retry_after}, backoff={delay})"
+                )
+                time.sleep(wait_time)
+                continue
             # Retry only on server errors (5xx)
-            if 500 <= status_code < 600:
-                logging.warning(f'Server error {status_code} on attempt {attempt}')
-                breaker.record_failure()
+            elif 500 <= status_code < 600:
+                logging.warning(
+                    f"[RUN {run_ts}] [ATTEMPT {attempt}] [SERVER_ERROR {status_code}]"
+                )
+                
             else:
-                logging.error(f'Client error {status_code} - not retrying')
+                logging.error(
+                    f"[EVENT {run_ts}] [PROC {now()}] [ATTEMPT {attempt}] [CLIENT_ERROR {status_code}]"
+                )
                 raise
         #-----------------------
-        # HANDLE OTHER ERRORS
+        # OTHER ERRORS
         #-----------------------
         except requests.exceptions.RequestException as e:
-            logging.error(f'Request failed: {e}')
-            breaker.record_failure()
-            raise
+            logging.warning(
+                f"[EVENT {run_ts}] [PROC {now()}] [ATTEMPT {attempt}] [REQUEST_EXCEPTION] {e}"
+            )
         
         #-----------------------
         # BACKOFF BEFORE RETRY
         #-----------------------
         if attempt < MAX_RETRIES:
-            logging.info(f'Waiting {delay}s before retry...')
+            logging.info(f"[EVENT {run_ts}] [PROC {now()}] [ATTEMPT {attempt}] Waiting {delay}s before retry")
             time.sleep(delay)
             delay *=2      #exponential backoff
 
     #---------------------
     # FINAL FAILURE
     #---------------------
-    logging.warning(f"Missing data for {timestamp} after all retries failed")       
+    logging.error(f"[EVENT {run_ts}] [PROC {now()}] [FAILED] Missing data after {MAX_RETRIES} attempts")
+    breaker.record_failure()       
     raise Exception('Failed to fetch crypto data after multiple retries')        
 
 #---------------------------
 # STEP 2: UPLOAD TO GCS
 #---------------------------
-def upload_to_gcs(data):
+def upload_to_gcs(data, timestamp):
     client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
-    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    #need to review how to get timestamp str for naming data files in gcs 
+    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S') # replace with folowing path = ...
     
-    blob_name = f'raw/crypto/prices/crypto_{timestamp}.json'
+    #path = timestamp.strftime('year=%Y/month=%m/day=%d/hour=%H/minute=%M')
+    #blob_name = f"{path}/crypto_{timestamp.strftime('%Y%m%d_%H%M')}.json"
+
+    blob_name = f'raw/crypto/prices/crypto_{timestamp}.json' ### fix path name with above blob_name but make sure consistent with bucket schema
     blob = bucket.blob(blob_name)
     
     try:
@@ -153,14 +192,18 @@ def upload_to_gcs(data):
 #---------------------------
 # PIPELINE
 #---------------------------
-def main():
-    print('Fetching crypto data ...')
-    data = fetch_crypto_data()
+def run_pipeline(timestamp=None):
+    if timestamp is None:
+        timestamp = get_default_timestamp()
+
+    print('Fetching crypto data for {timestamp.isoformat()}')
+    data = fetch_crypto_data(timestamp)
 
     print('Uploading to GCS ...')
-    upload_to_gcs(data)
+    upload_to_gcs(data, timestamp)
 
     print('Done!')
 
 if __name__ == '__main__':
-    main()    
+    run_pipeline()
+    #later when scheduler --> run_pipeline(timestamp=execution_time_from_scheduler)    
