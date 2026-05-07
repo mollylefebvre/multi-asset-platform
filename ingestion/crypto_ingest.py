@@ -12,7 +12,7 @@ def get_default_timestamp():
     Return the latest *safe* complete minute.
     """
     now =datetime.now(timezone.utc)
-    return (now - timedelta(minute=1)).replace(second=0, microsecond=0)
+    return (now - timedelta(minutes=1)).replace(second=0, microsecond=0)
 
 #---------------------------
 # CONFIG
@@ -127,6 +127,7 @@ def fetch_crypto_data(timestamp):
                     f"Retry after {retry_after}s (retry_after={retry_after}, backoff={delay})"
                 )
                 time.sleep(wait_time)
+                delay *= 2
                 continue
             # Retry only on server errors (5xx)
             elif 500 <= status_code < 600:
@@ -168,13 +169,10 @@ def fetch_crypto_data(timestamp):
 def upload_to_gcs(data, timestamp):
     client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
-    #need to review how to get timestamp str for naming data files in gcs 
-    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S') # replace with folowing path = ...
     
-    #path = timestamp.strftime('year=%Y/month=%m/day=%d/hour=%H/minute=%M')
-    #blob_name = f"{path}/crypto_{timestamp.strftime('%Y%m%d_%H%M')}.json"
+    timestamp = timestamp.strftime('%Y%m%d_%H%M%S') 
 
-    blob_name = f'raw/crypto/prices/crypto_{timestamp}.json' ### fix path name with above blob_name but make sure consistent with bucket schema
+    blob_name = f'raw/crypto/prices/crypto_{timestamp}.json'
     blob = bucket.blob(blob_name)
     
     try:
@@ -196,7 +194,7 @@ def run_pipeline(timestamp=None):
     if timestamp is None:
         timestamp = get_default_timestamp()
 
-    print('Fetching crypto data for {timestamp.isoformat()}')
+    print(f'Fetching crypto data for {timestamp.isoformat()}')
     data = fetch_crypto_data(timestamp)
 
     print('Uploading to GCS ...')
