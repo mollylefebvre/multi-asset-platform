@@ -1,4 +1,5 @@
 import logging
+import pybreaker
 import requests
 import json
 import time
@@ -50,14 +51,9 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 #---------------------------
-# BREAKER SETUP
+# INITIATE BREAKER
 #---------------------------
-class CircuitBreaker:
-    def __init__(self, failure_threshold=3, recovery_time=180):
-        self.failure_threshold = failure_threshold
-        self.recovery_time = recovery_time
-        self.failures = 0
-        self.last_failure_time = None
+breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=180)
 
 #---------------------------
 # STEP 1: FETCH DATA
@@ -65,20 +61,14 @@ class CircuitBreaker:
 MAX_RETRIES = 5
 INITIAL_DELAY = 1   # seconds
 TIMEOUT = (3,10)    # (connect, read)
-breaker = CircuitBreaker(failure_threshold=3, recovery_time=180)
 
+@breaker
 def fetch_crypto_data(timestamp):
 
     def now():
         return datetime.now(timezone.utc).isoformat()
     
     run_ts = timestamp.isoformat()
-
-    if not breaker.can_request():
-        logging.warning(
-            f"[EVENT {run_ts}] [PROC {now()}] [SKIP] Circuit breaker OPEN — skipping API call"
-        )
-        raise Exception("Circuit breaker active")
 
     params = {
         'vs_currency': 'usd',
@@ -102,7 +92,6 @@ def fetch_crypto_data(timestamp):
                 f"[EVENT {run_ts}] [PROC {now()}] [SUCCESS] Data fetched successfully on attempt {attempt}"
             )
 
-            breaker.record_success()
             return response.json()
         #------------------------
         # TIMEOUT
@@ -159,8 +148,7 @@ def fetch_crypto_data(timestamp):
     #---------------------
     # FINAL FAILURE
     #---------------------
-    logging.error(f"[EVENT {run_ts}] [PROC {now()}] [FAILED] Missing data after {MAX_RETRIES} attempts")
-    breaker.record_failure()       
+    logging.error(f"[EVENT {run_ts}] [PROC {now()}] [FAILED] Missing data after {MAX_RETRIES} attempts")      
     raise Exception('Failed to fetch crypto data after multiple retries')        
 
 #---------------------------
@@ -194,8 +182,14 @@ def run_pipeline(timestamp=None):
     if timestamp is None:
         timestamp = get_default_timestamp()
 
-    print(f'Fetching crypto data for {timestamp.isoformat()}')
-    data = fetch_crypto_data(timestamp)
+    try:
+        data = fetch_crypto_data(timestamp)
+    except pybreaker.CircuitBreakerError:
+        logging.warning(
+            f"[EVENT {timestamp.isoformat()}] [PROC {datetime.now(timezone.utc).isoformat()}] Circuit breaker OPEN - skipping API call"
+        )
+        return 
+    
 
     print('Uploading to GCS ...')
     upload_to_gcs(data, timestamp)
