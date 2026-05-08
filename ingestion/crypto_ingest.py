@@ -9,8 +9,9 @@ import gzip
 
 def get_default_timestamp():
     """
-    Used only when no scheduler is present.
-    Return the latest *safe* complete minute.
+    Fallback timestamp when no scheduler provides one.
+    Returns current UTC time minus 1 minute, truncated to the minute.
+    This ensures we never request data for a minute that hasn't fully elapsed.
     """
     now =datetime.now(timezone.utc)
     return (now - timedelta(minutes=1)).replace(second=0, microsecond=0)
