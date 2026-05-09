@@ -16,6 +16,8 @@ def get_default_timestamp():
     now =datetime.now(timezone.utc)
     return (now - timedelta(minutes=1)).replace(second=0, microsecond=0)
 
+def now():
+    return datetime.now(timezone.utc).isoformat()
 #---------------------------
 # CONFIG
 #---------------------------
@@ -65,10 +67,6 @@ TIMEOUT = (3,10)    # (connect, read)
 
 @breaker
 def fetch_crypto_data(timestamp):
-
-    def now():
-        return datetime.now(timezone.utc).isoformat()
-    
     run_ts = timestamp.isoformat()
 
     params = {
@@ -88,10 +86,6 @@ def fetch_crypto_data(timestamp):
 
             response = requests.get(URL, params=params, timeout=TIMEOUT)
             response.raise_for_status()
-
-            logging.info(
-                f"[EVENT {run_ts}] [PROC {now()}] [SUCCESS] Data fetched successfully on attempt {attempt}"
-            )
 
             return response.json()
         #------------------------
@@ -148,19 +142,13 @@ def fetch_crypto_data(timestamp):
 
     #---------------------
     # FINAL FAILURE
-    #---------------------
-    logging.error(f"[EVENT {run_ts}] [PROC {now()}] [FAILED] Missing data after {MAX_RETRIES} attempts")      
+    #---------------------      
     raise Exception('Failed to fetch crypto data after multiple retries')        
 
 #---------------------------
 # STEP 2: UPLOAD TO GCS
 #---------------------------
 def upload_to_gcs(data, timestamp):
-    def now():
-        return datetime.now(timezone.utc).isoformat()
-    
-    run_ts = timestamp.isoformat()
-
     client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
     
@@ -169,16 +157,11 @@ def upload_to_gcs(data, timestamp):
     blob_name = f'raw/crypto/prices/crypto_{ts_str}.json'
     blob = bucket.blob(blob_name)
     
-    try:
-        blob.content_encoding = 'gzip'
-        blob.upload_from_string(
-            gzip.compress(json.dumps(data).encode('utf-8')),
-            content_type='application/json'
-        )
-        logging.info(f"[EVENT {run_ts}] [PROC {now()}] [SUCCESS] Data uploaded: gs://{BUCKET_NAME}/{blob_name}")
-    except Exception as e:
-        logging.error(f"[EVENT {run_ts}] [PROC {now()}] Upload failed for {blob_name}: {e}")
-        raise    
+    blob.content_encoding = 'gzip'
+    blob.upload_from_string(
+        gzip.compress(json.dumps(data).encode('utf-8')),
+        content_type='application/json'
+    )    
 
     
 
@@ -189,9 +172,6 @@ def run_pipeline(timestamp=None):
     if timestamp is None:
         timestamp = get_default_timestamp()
     
-    def now():
-        return datetime.now(timezone.utc).isoformat()
-    
     run_ts = timestamp.isoformat()
 
     try:
@@ -199,11 +179,11 @@ def run_pipeline(timestamp=None):
         logging.info(f"[EVENT {run_ts}] [PROC {now()}] [SUCCESS] Crypto data successfully fetched!")
     except pybreaker.CircuitBreakerError:
         logging.warning(
-            f"[EVENT {run_ts}] [PROC {now()}] Circuit breaker OPEN - skipping API call"
+            f"[EVENT {run_ts}] [PROC {now()}] [SKIP] Circuit breaker OPEN - skipping API call"
         )
         return
     except Exception as e:
-        logging.error(f"[EVENT {run_ts}] [PROC {now()}] [FAIL] Failed to fetch data: {e}")
+        logging.error(f"[EVENT {run_ts}] [PROC {now()}] [FAILED] Failed to fetch data: {e}")
         return 
     
     
@@ -211,7 +191,7 @@ def run_pipeline(timestamp=None):
         upload_to_gcs(data, timestamp)
         logging.info(f"[EVENT {run_ts}] [PROC {now()}] [SUCCESS] Crypto data successfully uploaded!")
     except Exception as e:
-        logging.error(f"[EVENT {run_ts}] [PROC {now()}] [FAIL] Failed to upload data: {e}")
+        logging.error(f"[EVENT {run_ts}] [PROC {now()}] [FAILED] Failed to upload data: {e}")
         return
     
     logging.info(f"[EVENT {run_ts}] [PROC {now()}] [SUCCESS] Ingestion completed")
